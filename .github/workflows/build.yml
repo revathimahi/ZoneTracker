@@ -18,8 +18,9 @@ jobs:
       - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
       - run: sed -i 's/\r$//' gradlew || true
       - run: chmod +x gradlew || true
-      - run: ./gradlew assembleDebug --no-daemon
+      - run: ./gradlew assembleDebug --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: ZoneTracker-APK
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
