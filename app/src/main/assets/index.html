@@ -2,7 +2,7 @@
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Zone Form Tracker (OpenStreetMap)</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<link rel="stylesheet" href="leaflet/leaflet.css">
 <style>
 :root{--bg:#f6f7f4;--card:#fff;--tx:#1d2420;--mu:#68716b;--bd:#d9ddd6;--ac:#1f7a4d}
 @media (prefers-color-scheme:dark){:root{--bg:#141815;--card:#1d231f;--tx:#e8ece9;--mu:#98a39b;--bd:#323a34;--ac:#4cc58a}}
@@ -23,6 +23,7 @@ label{font-size:14px;font-weight:600}
 .zl{background:none;border:none;box-shadow:none;font-weight:700;font-size:13px;color:#111;text-shadow:0 0 3px #fff,0 0 3px #fff}
 .tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:6px 8px;border-bottom:1px solid var(--bd);text-align:left;white-space:nowrap}
 .hide{display:none}
+button:disabled{opacity:.45}
 @keyframes pz{0%,100%{fill-opacity:.55}50%{fill-opacity:.25}}
 .pulse{animation:pz 1.4s ease-in-out infinite}
 </style></head><body>
@@ -38,6 +39,8 @@ label{font-size:14px;font-weight:600}
   <div class="row"><button onclick="calib()">I'm here (calibrate)</button><button onclick="clearCal()">Clear calibration</button><button onclick="clearZones()">Delete all zones</button></div>
   <p class="mu" id="hint">Zoom into your building on the satellite view, then draw Zone 1.</p>
   <p class="mu" id="gps">Waiting for GPS… allow location access.</p>
+  <p class="mu" id="rx">Receiver: n/a</p>
+  <p class="mu" id="ph">Phone: detecting…</p>
   <div id="map"></div>
   <p style="margin:10px 0 0">You are in: <span class="badge" id="zone">—</span></p>
  </div>
@@ -46,7 +49,9 @@ label{font-size:14px;font-weight:600}
   <input id="name" placeholder="Name / ID">
   <select id="cat"><option>Observation</option><option>Issue</option><option>Survey</option><option>Other</option></select>
   <textarea id="note" rows="3" placeholder="Notes"></textarea>
-  <button class="p" style="width:100%" onclick="submitForm()">Submit</button>
+  <label>Max accuracy to submit (± m)</label><input id="macc" type="number" value="4" min="1" step="0.5" onchange="try{localStorage.setItem('zmacc',this.value)}catch(e){}gate()">
+  <p class="mu" id="ready" style="font-weight:600">Waiting for GPS…</p>
+  <button class="p" id="sub" disabled style="width:100%" onclick="submitForm()">Submit</button>
   <p class="mu" id="msg"></p>
  </div>
 </div>
@@ -55,12 +60,13 @@ label{font-size:14px;font-weight:600}
  <div class="card">
   <div class="row"><button onclick="csv()">Download CSV</button><button onclick="clearAll()">Clear</button></div>
   <p class="mu">Accuracy = GPS error radius in metres. Satellites show real values only inside the Android app version; in a browser they show n/a.</p>
-  <div class="tw"><table><thead><tr><th>#</th><th>Zone</th><th>Name</th><th>Accuracy</th><th>Sats (used/in view)</th><th>Lat, Lng</th><th>Time</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <p class="mu" id="rxcard"></p>
+  <div class="tw"><table><thead><tr><th>#</th><th>Zone</th><th>Name</th><th>Accuracy</th><th>Sats (used/in view)</th><th>Category</th><th>Band</th><th>Systems</th><th>Sensitivity (C/N0)</th><th>Tuning</th><th>Lat, Lng</th><th>Time</th></tr></thead><tbody id="rows"></tbody></table></div>
   <p class="mu" id="sum"></p>
  </div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="leaflet/leaflet.js"></script>
 <script>
 var P=[[],[],[],[]],dz=-1,draft=[],dl=null,dm=[],polys=[],vm=[],pos=null,raw=null,off={lat:0,lng:0},cur=null,curAp=false,me=null,acc=null,first=true,cal=false,recs=[];
 var Z=["Zone 1","Zone 2","Zone 3","Zone 4"],COL=["#2e9e63","#2b7bd6","#e0a020","#d6455d"];
@@ -128,7 +134,44 @@ function finish(){if(draft.length<3){$("hint").textContent="Add at least 3 point
 function clearZones(){if(!confirm("Delete all zones?"))return;P=[[],[],[],[]];cur=null;endDraw();save();upd()}
 
 /* ---- calibration (fixed GPS offset) ---- */
-var sat=null;
+var sat=null,nativeT=0,cand=null,candN=0,stAp=false,lastSt=-9,lastAp=false;
+var dev=null,tb=null,sm=null,accH=[];
+try{dev=JSON.parse(localStorage.getItem("zdev")||"null");tb=localStorage.getItem("ztier")}catch(e){}
+window.onDevice=function(d){dev=d;try{localStorage.setItem("zdev",JSON.stringify(d))}catch(e){}upd()};
+var TIERS={A:{n:"High-accuracy",d:"dual-frequency, multi-constellation",deb:2,al:.6,t:"±1–5 m"},B:{n:"Standard",d:"multi-constellation",deb:3,al:.4,t:"±3–10 m"},C:{n:"Basic",d:"limited GNSS",deb:4,al:.25,t:"±5–20 m"}};
+function tier(){var t=null;if(sat&&sat.cons&&sat.used>0)t=(sat.dual&&sat.cons.length>=3)?"A":(sat.dual||sat.cons.length>=2)?"B":"C";
+ if(t&&(!tb||t<tb)){tb=t;try{localStorage.setItem("ztier",tb)}catch(e){}}return tb}
+function prof(){return TIERS[tier()||"B"]}
+function medAcc(){if(!accH.length)return null;var a=accH.slice().sort(function(x,y){return x-y});return a[a.length>>1]}
+function tuneTxt(){var q=prof();return"Kalman filter, switch zone after "+q.deb+" fixes"}
+function rxCard(){var t=tier();if(!t||!sat||!sat.cons)return"<b>Receiver parameters:</b> not detected yet (Android app, outdoors, needs a GPS fix).";
+ return"<b>Receiver parameters</b><br>Category: <b>"+t+" – "+TIERS[t].n+"</b> · Band: "+(sat.dual?"Dual (L1+L5)":"Single (L1)")+" · Systems: "+sat.cons.join("+")+" ("+sat.cons.length+")<br>Sensitivity: "+sensTxt()+"<br>Typical accuracy: "+TIERS[t].t+" · Active tuning: "+tuneTxt()+(dev?"<br>Phone: "+dev.brand+" "+dev.model+" · Android "+dev.rel:"")}
+function phoneTxt(){var t=tier(),m=medAcc();return "Phone: "+(dev?dev.brand+" "+dev.model+" · Android "+dev.rel+" · ":"")+(t?"Category "+t+" – "+TIERS[t].n+" ("+TIERS[t].d+", typical "+TIERS[t].t+")":"Category: detecting… (needs a GPS fix outdoors)")+(m!==null?" · measured ±"+m.toFixed(0)+" m":"")}
+var kf=null,okN=0;
+function maxA(){var v=parseFloat($("macc").value);return v>0?v:4}
+function setFix(la,ln,ac,spd,t){
+ ac=Math.max(ac,1);accH.push(ac);if(accH.length>10)accH.shift();
+ var now=t||Date.now(),k=111320,cs=Math.cos(la*Math.PI/180);
+ if(!kf||Math.hypot((ln-kf.lng)*k*cs,(la-kf.lat)*k)>Math.max(40,4*ac))kf={lat:la,lng:ln,v:ac*ac,t:now};
+ else{var dt=Math.max(0,Math.min(5,(now-kf.t)/1000));kf.t=now;
+  var Q=Math.max(spd||0,({A:3,B:2,C:1.2}[tier()||"B"])*0.5);
+  kf.v+=dt*Q*Q;var g=kf.v/(kf.v+ac*ac);kf.lat+=g*(la-kf.lat);kf.lng+=g*(ln-kf.lng);kf.v*=(1-g)}
+ okN=ac<=maxA()?okN+1:0;
+ raw={lat:kf.lat,lng:kf.lng,acc:ac};pos=adj();upd()}
+function gate(){var m=maxA(),e=$("ready"),ok=!!pos&&hasZones()&&cur!==null&&cur>=0&&okN>=3;
+ $("sub").disabled=!ok;e.style.color="#b3402f";
+ if(!pos)e.textContent="Waiting for GPS…";
+ else if(!hasZones())e.textContent="Draw at least one zone first.";
+ else if(pos.acc>m)e.textContent="Not ready: accuracy ±"+pos.acc.toFixed(1)+" m, need ±"+m+" m or better. Go outdoors / wait for a better fix.";
+ else if(cur===null||cur<0)e.textContent="Not ready: you are outside the drawn zones.";
+ else if(okN<3){e.style.color="";e.textContent="Accuracy OK (±"+pos.acc.toFixed(1)+" m), holding steady… "+okN+"/3"}
+ else{e.style.color="#1f7a4d";e.textContent="✔ Ready to submit — "+Z[cur]+", ±"+pos.acc.toFixed(1)+" m"}}
+window.onNativeLoc=function(d){nativeT=Date.now();setFix(d.lat,d.lng,d.acc,d.spd,d.t)};
+function accClass(a){return a<=5?"excellent":a<=10?"good":a<=20?"fair":"poor"}
+function cnClass(c){return c>=40?"excellent":c>=35?"good":c>=25?"fair":"weak"}
+function cv(r,i){return r.cn?r.cn[i]:""}
+function sensTxt(){if(!sat||sat.cn0===undefined)return"n/a";return"avg "+sat.cn0+" / max "+sat.max+" / min "+sat.min+" dB-Hz ("+cnClass(sat.cn0)+"), "+sat.strong+" strong sats"}
+function rxTxt(){if(!sat||!sat.cons)return"n/a (browser cannot read it)";return(sat.dual?"Dual-frequency L1+L5 (high-accuracy class)":"Single-frequency L1 (standard class)")+" · "+sat.cons.join("+")+" · sensitivity "+sensTxt()}
 window.onGnss=function(d){sat=d;upd()};
 setInterval(function(){try{if(window.Android&&Android.getGnss)window.onGnss(JSON.parse(Android.getGnss()))}catch(e){}},1000);
 function satTxt(){return sat?sat.used+" used / "+sat.inView+" in view":"n/a (browser cannot read it)"}
@@ -146,8 +189,11 @@ function search(){var q=$("q").value.trim();if(!q)return;
 
 /* ---- live GPS ---- */
 function upd(){
- if(pos){$("gps").textContent="Lat "+pos.lat.toFixed(6)+", Lng "+pos.lng.toFixed(6)+" · accuracy ±"+pos.acc.toFixed(0)+" m"+" · Satellites: "+satTxt()+(pos.acc>30?" ⚠ weak GPS: zone may be approximate":"");
-  cur=zoneOf(pos);
+ $("ph").textContent=phoneTxt();
+ $("rx").textContent="Receiver: "+rxTxt();
+ if(pos){$("gps").textContent="Lat "+pos.lat.toFixed(6)+", Lng "+pos.lng.toFixed(6)+" · accuracy ±"+pos.acc.toFixed(0)+" m ("+accClass(pos.acc)+")"+" · Satellites: "+satTxt()+(pos.acc>30?" ⚠ weak GPS: zone may be approximate":"");
+  var zn0=zoneOf(pos),apn=curAp;if(zn0===cand)candN++;else{cand=zn0;candN=1}
+  if(cur===null||zn0===cur||candN>=prof().deb||pos.acc<=8){cur=zn0;stAp=apn}curAp=stAp;
   if(!me){me=L.circleMarker([pos.lat,pos.lng],{radius:8,color:"#fff",weight:2,fillColor:"#2b7bd6",fillOpacity:1}).addTo(map);acc=L.circle([pos.lat,pos.lng],{radius:pos.acc,color:"#2b7bd6",weight:1,fillOpacity:.1}).addTo(map)}
   else{me.setLatLng([pos.lat,pos.lng]);acc.setLatLng([pos.lat,pos.lng]).setRadius(pos.acc)}
   if(first&&!hasZones()){map.setView([pos.lat,pos.lng],18)}first=false}
@@ -156,28 +202,30 @@ function upd(){
  else if(cur<0){z.textContent="Outside zones";z.className="badge out";$("fz").textContent="outside zones"}
  else{z.textContent=Z[cur]+(curAp?" (approx)":"");z.className="badge";$("fz").textContent=Z[cur]}
  z.style.background=(cur!==null&&cur>=0)?COL[cur]:"";
- styleZones()}
+ if(lastSt!==cur||lastAp!==curAp){lastSt=cur;lastAp=curAp;styleZones()}gate()}
 function hasZones(){return P.some(function(g){return g.length>=3})}
-if(navigator.geolocation){navigator.geolocation.watchPosition(function(p){raw={lat:p.coords.latitude,lng:p.coords.longitude,acc:p.coords.accuracy};pos=adj();upd()},
+if(navigator.geolocation){navigator.geolocation.watchPosition(function(p){if(Date.now()-nativeT<5000)return;setFix(p.coords.latitude,p.coords.longitude,p.coords.accuracy,p.coords.speed,p.timestamp)},
  function(e){$("gps").textContent="GPS error: "+e.message+" (allow location; page must be on HTTPS)"},{enableHighAccuracy:true,maximumAge:0,timeout:20000})}
 else $("gps").textContent="Geolocation not supported.";
 
 /* ---- form + report ---- */
 function submitForm(){
  if(!pos||!hasZones()){$("msg").textContent="Draw at least one zone and wait for a GPS fix.";return}
+ if(okN<3||pos.acc>maxA()||cur===null||cur<0){$("msg").textContent="Not ready: accuracy must be ±"+maxA()+" m or better and you must be inside a zone.";return}
  if(!$("name").value.trim()){$("msg").textContent="Enter a name / ID.";return}
  var zn=(cur<0?"Outside zones":Z[cur])+(curAp?" (approx)":"");
- recs.push({zone:zn,name:$("name").value.trim(),cat:$("cat").value,note:$("note").value,lat:pos.lat,lng:pos.lng,acc:pos.acc,sats:sat?sat.used+"/"+sat.inView:"n/a",t:new Date().toLocaleString()});
+ recs.push({zone:zn,name:$("name").value.trim(),cat:$("cat").value,note:$("note").value,lat:pos.lat,lng:pos.lng,acc:pos.acc,sats:sat?sat.used+"/"+sat.inView:"n/a",rx:sat&&sat.cons?(sat.dual?"Dual":"Single")+" "+sat.cons.length+" const · Cat "+tier():"n/a",cat:tier()||"n/a",band:sat&&sat.cons?(sat.dual?"Dual (L1+L5)":"Single (L1)"):"n/a",sys:sat&&sat.cons?sat.cons.join("+"):"n/a",tune:tuneTxt(),sens:sensTxt(),cn:sat&&sat.cons?[sat.cn0,sat.max,sat.min,sat.strong]:null,t:new Date().toLocaleString()});
  save();$("name").value="";$("note").value="";$("msg").textContent="Saved in "+zn+" ✔"}
 function esc(s){return String(s).replace(/[&<>]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;"}[c]})}
-function report(){var h="",cnt={};
- recs.forEach(function(r,i){cnt[r.zone]=(cnt[r.zone]||0)+1;h+="<tr><td>"+(i+1)+"</td><td>"+r.zone+"</td><td>"+esc(r.name)+"</td><td>±"+r.acc.toFixed(0)+" m</td><td>"+r.sats+"</td><td>"+r.lat.toFixed(5)+", "+r.lng.toFixed(5)+"</td><td>"+r.t+"</td></tr>"});
- $("rows").innerHTML=h||'<tr><td colspan="7">No submissions yet</td></tr>';
+function report(){var h="",cnt={};$("rxcard").innerHTML=rxCard();
+ recs.forEach(function(r,i){cnt[r.zone]=(cnt[r.zone]||0)+1;h+="<tr><td>"+(i+1)+"</td><td>"+r.zone+"</td><td>"+esc(r.name)+"</td><td>±"+r.acc.toFixed(0)+" m</td><td>"+r.sats+"</td><td>"+(r.cat||"n/a")+"</td><td>"+(r.band||"n/a")+"</td><td>"+(r.sys||"n/a")+"</td><td>"+(r.sens||"n/a")+"</td><td>"+(r.tune||"n/a")+"</td><td>"+r.lat.toFixed(5)+", "+r.lng.toFixed(5)+"</td><td>"+r.t+"</td></tr>"});
+ $("rows").innerHTML=h||'<tr><td colspan="12">No submissions yet</td></tr>';
  $("sum").textContent=Object.keys(cnt).map(function(k){return k+": "+cnt[k]}).join(" · ")}
-function csv(){var l=["zone,name,category,note,lat,lng,accuracy_m,satellites,time"];
- recs.forEach(function(r){l.push([r.zone,r.name,r.cat,r.note,r.lat,r.lng,r.acc.toFixed(1),r.sats,r.t].map(function(v){return '"'+String(v).replace(/"/g,'""')+'"'}).join(","))});
+function csv(){var l=["zone,name,category,note,lat,lng,accuracy_m,satellites,category,band,systems,tuning,cn0_avg_dBHz,cn0_max_dBHz,cn0_min_dBHz,strong_sats,sensitivity_class,time"];
+ recs.forEach(function(r){l.push([r.zone,r.name,r.cat,r.note,r.lat,r.lng,r.acc.toFixed(1),r.sats,r.cat||"n/a",r.band||"n/a",r.sys||"n/a",r.tune||"n/a",cv(r,0),cv(r,1),cv(r,2),cv(r,3),r.cn?cnClass(r.cn[0]):"",r.t].map(function(v){return '"'+String(v).replace(/"/g,'""')+'"'}).join(","))});
  var a=document.createElement("a");a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(l.join("\n"));a.download="zone-report.csv";a.click()}
 function clearAll(){if(confirm("Delete all records?")){recs=[];save();report()}}
+try{var mv=localStorage.getItem("zmacc");if(mv)$("macc").value=mv}catch(e){}
 render();
 if(hasZones()){var all=[];P.forEach(function(g){g.forEach(function(x){all.push(x)})});map.fitBounds(all,{padding:[30,30]})}
 upd();
