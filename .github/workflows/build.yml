@@ -16,8 +16,10 @@ jobs:
         with:
           gradle-version: '8.9'
       - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
-      - run: ./gradlew assembleDebug --no-daemon
+      - run: chmod +x gradlew || true
+      - run: ./gradlew assembleDebug --no-daemon || gradle assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: ZoneTracker-APK
           path: app/build/outputs/apk/debug/app-debug.apk
+This will trigger Git to upload your code to GitHub and may open a browser popup to sign in to your GitHub account)
