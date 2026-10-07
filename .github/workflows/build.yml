@@ -23,4 +23,3 @@ jobs:
         with:
           name: ZoneTracker-APK
           path: app/build/outputs/apk/debug/app-debug.apk
-This will trigger Git to upload your code to GitHub and may open a browser popup to sign in to your GitHub account)
